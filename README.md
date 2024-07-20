@@ -14,4 +14,4 @@ If you're using PeFoMed in your research or applications, please cite using this
 ```
 ## License
 This repository is under [BSD 3-Clause License](LICENSE.md).
-Many codes are based on [Lavis]([https://github.com/salesforce/LAVIS](https://github.com/salesforce/LAVIS)) and [MiniGPT-v2]([https://github.com/salesforce/LAVIS](https://github.com/Vision-CAIR/MiniGPT-4))
+Many codes are based on [Lavis](https://github.com/salesforce/LAVIS) and [MiniGPT-v2](https://github.com/Vision-CAIR/MiniGPT-4)
