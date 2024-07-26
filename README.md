@@ -8,6 +8,7 @@ This is the official implementation of [PeFoMed: Parameter Efficient Fine-tuning
 
 ## Datasets
 The configuration of all datasets needs to be set in the corresponding dataset configuration file in the **pefomed/configs/datasets/medical**
+
 Stage 1 finetune datasets: [ROCO](https://link.springer.com/chapter/10.1007/978-3-030-01364-6_20), [CLEF2022](https://ceur-ws.org/Vol-3180/paper-95.pdf), [MEDICAT](https://arxiv.org/abs/2010.06000), and [MIMIC-CXR](https://arxiv.org/abs/1901.07042)
 
 Stage 2 finetune medical VQA datasets: [VQA-RAD](https://www.nature.com/articles/sdata2018251#data-citations), [PathVQA](https://arxiv.org/abs/2003.10286) and [Slake](https://arxiv.org/abs/2102.09542).
