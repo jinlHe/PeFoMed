@@ -1,6 +1,11 @@
 # PeFoMed
 This is the official implementation of [PeFoMed: Parameter Efficient Fine-tuning of Multimodal Large Language Models for Medical Imaging](https://arxiv.org/abs/2401.02797).
 
+<div align=center>
+<img src="fig/models.png" style="zoom:75%;">
+</div>
+<center>Figure 1: Overview of the PeFoMed. </center>
+
 ## Datasets
 Stage 1 finetune datasets: [ROCO](https://link.springer.com/chapter/10.1007/978-3-030-01364-6_20), [CLEF2022](https://ceur-ws.org/Vol-3180/paper-95.pdf), [MEDICAT](https://arxiv.org/abs/2010.06000), and [MIMIC-CXR](https://arxiv.org/abs/1901.07042)
 
