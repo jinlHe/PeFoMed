@@ -2,11 +2,11 @@
 This is the official implementation of [PeFoMed: Parameter Efficient Fine-tuning of Multimodal Large Language Models for Medical Imaging](https://arxiv.org/abs/2401.02797).
 
 ## Datasets
-Stage 1 finetune datasets:[ROCO](https://link.springer.com/chapter/10.1007/978-3-030-01364-6_20), [CLEF2022](https://ceur-ws.org/Vol-3180/paper-95.pdf), [MEDICAT](https://arxiv.org/abs/2010.06000), and [MIMIC-CXR](https://arxiv.org/abs/1901.07042)
+Stage 1 finetune datasets: [ROCO](https://link.springer.com/chapter/10.1007/978-3-030-01364-6_20), [CLEF2022](https://ceur-ws.org/Vol-3180/paper-95.pdf), [MEDICAT](https://arxiv.org/abs/2010.06000), and [MIMIC-CXR](https://arxiv.org/abs/1901.07042)
 
-Stage 2 finetune medical VQA datasets: [VQA-RAD dataset](https://www.nature.com/articles/sdata2018251#data-citations), [PathVQA dataset](https://arxiv.org/abs/2003.10286) and [Slake dataset](https://arxiv.org/abs/2102.09542).
+Stage 2 finetune medical VQA datasets: [VQA-RAD](https://www.nature.com/articles/sdata2018251#data-citations), [PathVQA](https://arxiv.org/abs/2003.10286) and [Slake](https://arxiv.org/abs/2102.09542).
 
-Stage 2 finetune MRG dataset: [IU-Xray dataset](https://pubmed.ncbi.nlm.nih.gov/26133894/)
+Stage 2 finetune MRG dataset: [IU-Xray](https://pubmed.ncbi.nlm.nih.gov/26133894/)
 
 ## Acknowledgement
 If you're using PeFoMed in your research or applications, please cite using this BibTeX:
