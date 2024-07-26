@@ -2,7 +2,7 @@
 This is the official implementation of [PeFoMed: Parameter Efficient Fine-tuning of Multimodal Large Language Models for Medical Imaging](https://arxiv.org/abs/2401.02797).
 
 <div align=center>
-<img src="fig/model.pdf" style="zoom:75%;">
+<img src="fig/model.png" style="zoom:75%;">
 </div>
 <center>Figure 1: Overview of the PeFoMed. </center>
 
