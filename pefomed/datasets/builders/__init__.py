@@ -6,34 +6,7 @@
 """
 
 from pefomed.datasets.builders.base_dataset_builder import load_dataset_config
-from pefomed.datasets.builders.caption_builder import (
-    COCOCapBuilder,
-    MSRVTTCapBuilder,
-    MSVDCapBuilder,
-    VATEXCapBuilder,
-    MSRVTTCapInstructBuilder,
-    MSVDCapInstructBuilder,
-    VATEXCapInstructBuilder,
-    WebVid2MCapBuilder,
-    WebVid2MCapInstructBuilder,
-    VALORCaptionBuilder,
-    VALORCaptionInstructBuilder,
-    ViolinCapBuilder,
-    ViolinCapInstructBuilder,
-    VlepCaptionInstructBuilder, 
-    VlepCaptionBuilder,
-    YouCookCaptionBuilder,
-    YouCookCaptionInstructBuilder,
-    COINCaptionBuilder,
-    COINCaptionInstructBuilder,
-    CharadeCaptionBuilder,
-    CharadeCaptionInstructBuilder,
-    TextCapsCapBuilder,
-    TextCapsCapInstructBuilder,
-    Flickr30kCapBuilder,
-    Flickr30kCapInstructBuilder
 
-)
 from pefomed.datasets.builders.image_text_pair_builder import (
     ConceptualCaption12MBuilder,
     ConceptualCaption12MInstructBuilder,
