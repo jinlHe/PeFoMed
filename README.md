@@ -23,7 +23,7 @@ If you're using PeFoMed in your research or applications, please cite using this
 ```bibtex
 @misc{liu2024pefomedparameterefficientfinetuning,
       title={PeFoMed: Parameter Efficient Fine-tuning of Multimodal Large Language Models for Medical Imaging}, 
-      author={Gang Liu and Jinlong He and Pengfei Li and Genrong He and Zhaolin Chen and Shenjun Zhong},
+      author={Jinlong He and Gang Liu and Pengfei Li and Genrong He and Zhaolin Chen and Shenjun Zhong},
       year={2024},
       eprint={2401.02797},
       archivePrefix={arXiv},
