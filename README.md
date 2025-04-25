@@ -15,6 +15,9 @@ Stage 2 finetune medical VQA datasets: [VQA-RAD](https://www.nature.com/articles
 
 Stage 2 finetune MRG dataset: [IU-Xray](https://pubmed.ncbi.nlm.nih.gov/26133894/)
 
+## Checkpoints
+You can download the checkpoints in [HuggingFace](https://huggingface.co/SmallBosser/PeFoMed)
+
 ## Acknowledgement
 If you're using PeFoMed in your research or applications, please cite using this BibTeX:
 ```bibtex
