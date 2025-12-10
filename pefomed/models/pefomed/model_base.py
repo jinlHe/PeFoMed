@@ -389,6 +389,7 @@ class ModelBase(BaseModel):
                 min_length=min_length,
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
+                pad_token_id=self.llama_tokenizer.pad_token_id,
                 # stopping_criteria=stopping_criteria,
             )
 
@@ -461,6 +462,9 @@ class ModelBase(BaseModel):
                 llama_model_path,
                 torch_dtype=torch.float16,
             )
+
+        llama_model.config.pad_token_id = llama_tokenizer.pad_token_id
+        logging.info(f'Set pad_token_id to {llama_tokenizer.pad_token_id} (unk_token_id)')
 
         if lora_r > 0:
             llama_model = prepare_model_for_int8_training(llama_model)
