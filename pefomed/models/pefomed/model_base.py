@@ -6,8 +6,11 @@ import torch
 import torch.nn as nn
 from peft import (
     LoraConfig,
+    PrefixTuningConfig,
+    PromptTuningConfig,
     get_peft_model,
-    prepare_model_for_int8_training,
+    prepare_model_for_kbit_training,
+    TaskType,
 )
 from transformers import LlamaTokenizer
 
@@ -35,21 +38,41 @@ class ModelBase(BaseModel):
             end_sym='\n',
             low_resource=False,  # use 8 bit and put vit in cpu
             device_8bit=0,  # the device of 8bit model should be set when loading and cannot be changed anymore.
+            # PEFT方法选择和参数
+            peft_method="lora",  # 可选: "lora", "prompt_tuning", "prefix_tuning", "none"
+            # LoRA参数
             lora_r=0,  # lora_r means lora is not used
             lora_target_modules=["q_proj", "v_proj"],
             lora_alpha=16,
             lora_dropout=0.05,
+            # Prompt Tuning参数
+            prompt_tuning_num_virtual_tokens=20,
+            prompt_tuning_init_text=None,
+            # Prefix Tuning参数
+            prefix_tuning_num_virtual_tokens=20,
+            prefix_tuning_encoder_hidden_size=None,
     ):
         super().__init__()
+        
+        # 存储 PEFT 方法，供 DDP 配置使用
+        self.peft_method = peft_method
 
         self.llama_model, self.llama_tokenizer = self.init_llm(
             llama_model_path=llama_model,
             low_resource=low_resource,
             low_res_device=device_8bit,
+            peft_method=peft_method,
+            # LoRA参数
             lora_r=lora_r,
             lora_target_modules=lora_target_modules,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
+            # Prompt Tuning参数
+            prompt_tuning_num_virtual_tokens=prompt_tuning_num_virtual_tokens,
+            prompt_tuning_init_text=prompt_tuning_init_text,
+            # Prefix Tuning参数
+            prefix_tuning_num_virtual_tokens=prefix_tuning_num_virtual_tokens,
+            prefix_tuning_encoder_hidden_size=prefix_tuning_encoder_hidden_size,
         )
 
         self.visual_encoder, self.ln_vision = self.init_vision_encoder(
@@ -319,22 +342,58 @@ class ModelBase(BaseModel):
             targets[i, input_lens[i] + 1:input_lens[i] + len(target) + 1] = target  # plus 1 for bos.tensor(1,300)
 
         with self.maybe_autocast():
+            # Prefix Tuning 和 Prompt Tuning 必须禁用 cache
+            # 因为 PEFT 返回的 past_key_values 格式与 transformers 新版本不兼容
+            # 注意：不要显式传递 past_key_values，让 PEFT 内部处理，避免参数冲突
+            if self.peft_method.lower() in ["prefix_tuning", "prompt_tuning"]:
+                use_cache = False
+                # 添加调试信息（仅在第一次调用时打印）
+                if not hasattr(self, '_prefix_tuning_debug_printed'):
+                    logging.info(f"[Prefix Tuning] Setting use_cache=False for {self.peft_method}")
+                    self._prefix_tuning_debug_printed = True
+            else:
+                use_cache = None
+            
             outputs = self.llama_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 return_dict=True,
                 labels=targets,
-                reduction=reduction
+                reduction=reduction,
+                use_cache=use_cache,
             )
         loss = outputs.loss
 
         return {"loss": loss}
 
     def embed_tokens(self, token_ids):
-        if hasattr(self.llama_model.base_model, 'model'):  ## lora wrapped model
-            embeds = self.llama_model.base_model.model.model.embed_tokens(token_ids)
+        """
+        获取 token embeddings，兼容不同的 PEFT 方法
+        
+        PEFT 包装后的模型结构：
+        - LoRA (with prepare_model_for_kbit_training): base_model.model.model.embed_tokens
+        - Prefix Tuning: base_model.model.embed_tokens
+        - Prompt Tuning: base_model.model.embed_tokens
+        - None: base_model.model.embed_tokens
+        """
+        base_model = self.llama_model.base_model
+        
+        # 尝试不同的路径来访问 embed_tokens
+        # 路径1: base_model.model.model.embed_tokens (LoRA with prepare_model_for_kbit_training)
+        if hasattr(base_model, 'model') and hasattr(base_model.model, 'model') and hasattr(base_model.model.model, 'embed_tokens'):
+            embeds = base_model.model.model.embed_tokens(token_ids)
+        # 路径2: base_model.model.embed_tokens (Prefix Tuning, Prompt Tuning, 或标准结构)
+        elif hasattr(base_model, 'model') and hasattr(base_model.model, 'embed_tokens'):
+            embeds = base_model.model.embed_tokens(token_ids)
+        # 路径3: base_model.embed_tokens (fallback)
+        elif hasattr(base_model, 'embed_tokens'):
+            embeds = base_model.embed_tokens(token_ids)
         else:
-            embeds = self.llama_model.base_model.embed_tokens(token_ids)
+            raise AttributeError(
+                f"Cannot find embed_tokens in model structure. "
+                f"base_model type: {type(base_model)}, "
+                f"has 'model': {hasattr(base_model, 'model')}"
+            )
         return embeds
 
     @torch.no_grad()
@@ -434,54 +493,188 @@ class ModelBase(BaseModel):
         return output_class_ranks.tolist()
 
     ##################################################Transfer from base_model down################################
-    def maybe_autocast(self, dtype=torch.float16):
+    def maybe_autocast(self, dtype=None):
+        """
+        自动混合精度上下文管理器
+        
+        Args:
+            dtype: 精度类型，默认 None 表示使用 bfloat16（如果可用）或 float16
+                   推荐使用 bfloat16 因为它有更大的数值范围，更不容易溢出
+        """
         # if on cpu, don't use autocast
-        # if on gpu, use autocast with dtype if provided, otherwise use torch.float16
         enable_autocast = self.device != torch.device("cpu")
 
         if enable_autocast:
+            # 如果没有指定 dtype，优先使用 bfloat16（数值更稳定）
+            if dtype is None:
+                # 检查是否支持 bfloat16
+                if torch.cuda.is_bf16_supported():
+                    dtype = torch.bfloat16
+                else:
+                    dtype = torch.float16
             return torch.cuda.amp.autocast(dtype=dtype)
         else:
             return contextlib.nullcontext()
 
-    def init_llm(cls, llama_model_path, low_resource=False, low_res_device=0, lora_r=0,
-                 lora_target_modules=["q_proj", "v_proj"], **lora_kargs):
-        logging.info('Loading LLAMA')
+    def init_llm(cls, llama_model_path, low_resource=False, low_res_device=0, 
+                 peft_method="lora",
+                 # LoRA参数
+                 lora_r=0,
+                 lora_target_modules=["q_proj", "v_proj"], 
+                 lora_alpha=16,
+                 lora_dropout=0.05,
+                 # Prompt Tuning参数
+                 prompt_tuning_num_virtual_tokens=20,
+                 prompt_tuning_init_text=None,
+                 # Prefix Tuning参数
+                 prefix_tuning_num_virtual_tokens=20,
+                 prefix_tuning_encoder_hidden_size=None,
+                 ):
+        """
+        初始化LLM模型并应用PEFT方法
+        
+        Args:
+            llama_model_path: LLaMA模型路径
+            low_resource: 是否使用8bit量化
+            low_res_device: 8bit模型设备
+            peft_method: PEFT方法选择，可选 "lora", "prompt_tuning", "prefix_tuning", "none"
+            
+            LoRA参数:
+                lora_r: LoRA秩
+                lora_target_modules: LoRA目标模块
+                lora_alpha: LoRA alpha参数
+                lora_dropout: LoRA dropout率
+                
+            Prompt Tuning参数:
+                prompt_tuning_num_virtual_tokens: 虚拟token数量
+                prompt_tuning_init_text: 初始化文本
+                
+            Prefix Tuning参数:
+                prefix_tuning_num_virtual_tokens: 前缀token数量
+                prefix_tuning_encoder_hidden_size: 编码器隐藏层大小
+        """
+        logging.info(f'Loading LLAMA with PEFT method: {peft_method}')
+        import types  # 用于方法绑定
         llama_tokenizer = LlamaTokenizer.from_pretrained(llama_model_path, use_fast=False)
-        llama_tokenizer.pad_token = "$$"
+        # 使用已存在的 unk_token 作为 pad_token，避免添加新 token 导致索引越界
+        # LLaMA embedding 层大小固定为 32000，不能使用新 token ID
+        llama_tokenizer.pad_token = llama_tokenizer.unk_token
+
+        # 选择最佳的数据类型：优先使用 bfloat16（数值范围更大，更稳定）
+        # bfloat16 在 attention 计算中不容易溢出，避免 NaN 问题
+        if torch.cuda.is_bf16_supported():
+            model_dtype = torch.bfloat16
+            logging.info("Using bfloat16 for LLM (better numerical stability)")
+        else:
+            model_dtype = torch.float16
+            logging.info("Using float16 for LLM (bfloat16 not supported)")
 
         if low_resource:
             llama_model = LlamaForCausalLM.from_pretrained(
                 llama_model_path,
-                torch_dtype=torch.float16,
+                torch_dtype=model_dtype,
                 load_in_8bit=True,
                 device_map={'': low_res_device}
             )
         else:
             llama_model = LlamaForCausalLM.from_pretrained(
                 llama_model_path,
-                torch_dtype=torch.float16,
+                torch_dtype=model_dtype,
             )
+        
+        # 同步更新模型配置中的 pad_token_id
+        llama_model.config.pad_token_id = llama_tokenizer.pad_token_id
+        logging.info(f'Set pad_token_id to {llama_tokenizer.pad_token_id} (unk_token_id)')
+        
+        # 禁用 cache 以兼容 PEFT 的 Prefix Tuning
+        # 新版 transformers 使用 DynamicCache，但 PEFT 返回 tuple 格式，导致不兼容
+        if peft_method.lower() in ["prefix_tuning", "prompt_tuning"]:
+            llama_model.config.use_cache = False
+            logging.info(f'Disabled cache for {peft_method} to ensure compatibility')
 
+        # 同步更新模型配置中的 pad_token_id
         llama_model.config.pad_token_id = llama_tokenizer.pad_token_id
         logging.info(f'Set pad_token_id to {llama_tokenizer.pad_token_id} (unk_token_id)')
 
-        if lora_r > 0:
-            llama_model = prepare_model_for_int8_training(llama_model)
-            loraconfig = LoraConfig(
+        # 应用不同的PEFT方法
+        if peft_method.lower() == "lora" and lora_r > 0:
+            logging.info(f'Applying LoRA: r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}')
+            logging.info(f'Target modules: {lora_target_modules}')
+            
+            llama_model = prepare_model_for_kbit_training(llama_model)
+            peft_config = LoraConfig(
                 r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
                 bias="none",
-                task_type="CAUSAL_LM",
+                task_type=TaskType.CAUSAL_LM,
                 target_modules=lora_target_modules,
-                **lora_kargs
             )
-            llama_model = get_peft_model(llama_model, loraconfig)
-
+            llama_model = get_peft_model(llama_model, peft_config)
             llama_model.print_trainable_parameters()
-
-        else:
+            
+        elif peft_method.lower() == "prompt_tuning":
+            logging.info(f'Applying Prompt Tuning: num_virtual_tokens={prompt_tuning_num_virtual_tokens}')
+            if prompt_tuning_init_text:
+                logging.info(f'Init text: {prompt_tuning_init_text}')
+            llama_model = prepare_model_for_kbit_training(llama_model)
+            
+            peft_config = PromptTuningConfig(
+                task_type=TaskType.CAUSAL_LM,
+                num_virtual_tokens=prompt_tuning_num_virtual_tokens,
+                prompt_tuning_init="TEXT" if prompt_tuning_init_text else "RANDOM",
+                prompt_tuning_init_text=prompt_tuning_init_text,
+                tokenizer_name_or_path=llama_model_path,
+            )
+            llama_model = get_peft_model(llama_model, peft_config)
+            llama_model.print_trainable_parameters()
+            # 再次确保 use_cache=False，因为 PEFT 可能会改变配置
+            llama_model.config.use_cache = False
+            # 确保 PEFT 包装的模型使用自定义的 prepare_inputs_for_generation 方法
+            # 这对于支持 inputs_embeds 的生成至关重要
+            if hasattr(llama_model.base_model, 'prepare_inputs_for_generation'):
+                # 使用 types.MethodType 确保方法绑定正确
+                llama_model.prepare_inputs_for_generation = types.MethodType(
+                    llama_model.base_model.prepare_inputs_for_generation.__func__,
+                    llama_model
+                )
+            
+        elif peft_method.lower() == "prefix_tuning":
+            logging.info(f'Applying Prefix Tuning: num_virtual_tokens={prefix_tuning_num_virtual_tokens}')
+            if prefix_tuning_encoder_hidden_size:
+                logging.info(f'Encoder hidden size: {prefix_tuning_encoder_hidden_size}')
+            llama_model = prepare_model_for_kbit_training(llama_model)
             for name, param in llama_model.named_parameters():
                 param.requires_grad = False
+            
+            peft_config = PrefixTuningConfig(
+                task_type=TaskType.CAUSAL_LM,
+                num_virtual_tokens=prefix_tuning_num_virtual_tokens,
+                encoder_hidden_size=prefix_tuning_encoder_hidden_size if prefix_tuning_encoder_hidden_size else llama_model.config.hidden_size,
+                prefix_projection=True if prefix_tuning_encoder_hidden_size else False,
+            )
+            llama_model = get_peft_model(llama_model, peft_config)
+            llama_model.print_trainable_parameters()
+            # 确保 use_cache=False，Prefix Tuning 与 KV cache 不兼容
+            llama_model.config.use_cache = False
+            # 确保 PEFT 包装的模型使用自定义的 prepare_inputs_for_generation 方法
+            # 这对于支持 inputs_embeds 的生成至关重要
+            if hasattr(llama_model.base_model, 'prepare_inputs_for_generation'):
+                # 使用 types.MethodType 确保方法绑定正确
+                llama_model.prepare_inputs_for_generation = types.MethodType(
+                    llama_model.base_model.prepare_inputs_for_generation.__func__,
+                    llama_model
+                )
+            
+        elif peft_method.lower() == "none":
+            logging.info('No PEFT method applied, freezing all parameters')
+            for name, param in llama_model.named_parameters():
+                param.requires_grad = False
+        else:
+            logging.warning(f'Unknown PEFT method: {peft_method}, freezing all parameters')
+            for name, param in llama_model.named_parameters():
+                param.requires_grad = False
+                
         logging.info('Loading LLAMA Done')
         return llama_model, llama_tokenizer
 
@@ -511,7 +704,7 @@ class ModelBase(BaseModel):
     ):
         logging.info('Loading VIT')
 
-        assert model_name == "eva_clip_g", "vit model must be eva_clip_g"
+        assert model_name == "eva_clip_g", "vit model must be eva_clip_g for current version of MiniGPT-4"
         if not freeze:
             precision = "fp32"  # fp16 is not for training
 
