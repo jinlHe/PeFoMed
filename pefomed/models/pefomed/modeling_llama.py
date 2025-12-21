@@ -61,6 +61,26 @@ class LlamaForCausalLM(LlamaForCausalLMOrig):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        
+        # 确保 use_cache 被正确处理
+        # 如果显式传递了 use_cache=False，则使用该值；否则使用 config 中的值
+        if use_cache is None:
+            use_cache = self.config.use_cache if hasattr(self.config, 'use_cache') else False
+        
+        # 关键修复：当 use_cache=False 时，强制设置 past_key_values=None
+        # 这可以避免 PEFT 返回的 tuple 格式 past_key_values 与 transformers 新版本不兼容的问题
+        if not use_cache:
+            # 如果 past_key_values 不是 None，说明 PEFT 可能返回了 tuple 格式
+            # 强制设置为 None 以避免格式不兼容
+            if past_key_values is not None:
+                import logging
+                if not hasattr(self, '_past_kv_debug_printed'):
+                    logging.warning(
+                        f"[LlamaForCausalLM] use_cache=False but past_key_values is not None. "
+                        f"Type: {type(past_key_values)}, Forcing to None to avoid compatibility issues."
+                    )
+                    self._past_kv_debug_printed = True
+            past_key_values = None
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
