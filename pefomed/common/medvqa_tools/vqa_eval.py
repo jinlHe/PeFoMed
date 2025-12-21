@@ -6,6 +6,8 @@ __author__ = 'aagrawal'
 # (https://github.com/tylin/coco-caption/blob/master/pycocoevalcap/eval.py).
 import sys
 import re
+import string
+from nltk.tokenize import TreebankWordTokenizer
 
 
 class MedVQAEval:
@@ -20,6 +22,7 @@ class MedVQAEval:
         self.params = {'question_id': vqa.getQuesIds()}
 
         self.ansComp = {}  # 存储答案对比
+        self.tokenizer = TreebankWordTokenizer()  # 用于 token recall 计算
 
         self.contractions = {"aint": "ain't", "arent": "aren't", "cant": "can't", "couldve": "could've",
                              "couldnt": "couldn't",
@@ -94,6 +97,37 @@ class MedVQAEval:
         answer = answer.replace(',', '').replace('x ray', 'xray').replace('\n', ' ').replace('\t', ' ')
         return answer
 
+    def calculate_token_recall(self, prediction, reference):
+        """
+        计算 Token Recall（词元召回率）用于 Open-Ended 问题评估
+        
+        参数:
+            prediction (str): 模型生成的答案
+            reference (str): 标准参考答案
+            
+        返回:
+            float: 召回率得分，范围 [0.0, 1.0]
+        """
+        # 分词
+        pred_tokens = self.tokenizer.tokenize(prediction.lower())
+        ref_tokens = self.tokenizer.tokenize(reference.lower())
+        
+        # 移除标点符号
+        pred_tokens = [t for t in pred_tokens if t not in string.punctuation]
+        ref_tokens = [t for t in ref_tokens if t not in string.punctuation]
+        
+        # 如果参考答案为空，返回 0
+        if len(ref_tokens) == 0:
+            return 0.0
+        
+        # 计算交集（使用集合，关注概念是否被提及）
+        common_tokens = set(pred_tokens) & set(ref_tokens)
+        
+        # 计算召回率
+        recall = len(common_tokens) / len(set(ref_tokens))
+        
+        return recall
+
     def evaluate(self, quesIds=None):
         if quesIds == None:
             quesIds = [quesId for quesId in self.params['question_id']]
@@ -109,6 +143,7 @@ class MedVQAEval:
         accQA = []  # 总的准确率
         accQuesType = {}  # 每种问题类型的准确率
         accAnsType = {}  # 每种答案类别的准确率
+        tokenRecallOpen = []  # OPEN 类型问题的 token recall
 
         print("computing accuracy")
         step = 0
@@ -145,6 +180,14 @@ class MedVQAEval:
                 accAnsType[ansType] = []
             accAnsType[ansType].append(gtAcc)
 
+            # 计算 OPEN 类型问题的 Token Recall
+            if ansType == 'OPEN':
+                # 使用原始答案（未经过度预处理）计算 token recall
+                resAns_raw = str(res[quesId]['answer'])
+                gtAns_raw = str(gts[quesId]['answer'])
+                token_recall = self.calculate_token_recall(resAns_raw, gtAns_raw)
+                tokenRecallOpen.append(token_recall)
+
             self.setEvalQA(quesId, gtAcc)
             self.setEvalQuesType(quesId, quesType, gtAcc)
             self.setEvalAnsType(quesId, ansType, gtAcc)
@@ -152,7 +195,7 @@ class MedVQAEval:
                 self.updateProgress(step / float(len(quesIds)))
             step = step + 1
 
-        self.setAccuracy(accQA, accQuesType, accAnsType)
+        self.setAccuracy(accQA, accQuesType, accAnsType, tokenRecallOpen)
         print("Done computing accuracy")
         print('count_error == ', count_error)
 
@@ -185,7 +228,7 @@ class MedVQAEval:
         outText = ' '.join(outText)
         return outText
 
-    def setAccuracy(self, accQA, accQuesType, accAnsType):
+    def setAccuracy(self, accQA, accQuesType, accAnsType, tokenRecallOpen=None):
 
         self.accuracy['overall'] = round(100 * float(sum(accQA)) / len(accQA), self.n)
         self.accuracy['perQuestionType'] = {
@@ -194,6 +237,11 @@ class MedVQAEval:
         self.accuracy['perAnswerType'] = {
             ansType: round(100 * float(sum(accAnsType[ansType])) / len(accAnsType[ansType]), self.n) for ansType in
             accAnsType}
+        
+        # 添加 OPEN 类型的 Token Recall（保留两位小数的百分比形式）
+        if tokenRecallOpen is not None and len(tokenRecallOpen) > 0:
+            avg_token_recall = sum(tokenRecallOpen) / len(tokenRecallOpen)
+            self.accuracy['tokenRecallOPEN'] = round(100 * avg_token_recall, 2)
 
     def setEvalQA(self, quesId, acc):
         self.evalQA[quesId] = round(100 * acc, self.n)
