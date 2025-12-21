@@ -88,8 +88,19 @@ class RunnerBase:
             # distributed training wrapper
             if self.use_distributed:
                 if self._wrapped_model is None:
+                    # Check if we need to set find_unused_parameters for PEFT methods
+                    # This is required for prefix_tuning and similar methods
+                    find_unused_params = False
+                    if hasattr(self._model, 'peft_method'):
+                        peft_method = getattr(self._model, 'peft_method', 'none')
+                        if peft_method in ['prefix_tuning', 'prompt_tuning']:
+                            find_unused_params = True
+                            logging.info(f"Setting find_unused_parameters=True for {peft_method}")
+                    
                     self._wrapped_model = DDP(
-                        self._model, device_ids=[self.config.run_cfg.gpu]
+                        self._model, 
+                        device_ids=[self.config.run_cfg.gpu],
+                        find_unused_parameters=find_unused_params
                     )
             else:
                 self._wrapped_model = self._model
@@ -147,7 +158,6 @@ class RunnerBase:
             # optional parameters
             decay_rate = self.config.run_cfg.get("lr_decay_rate", None)
             warmup_start_lr = self.config.run_cfg.get("warmup_lr", -1)
-            warmup_steps = self.config.run_cfg.get("warmup_steps", 0)
 
             iters_per_epoch = self.config.run_cfg.get("iters_per_epoch", None)
 
@@ -158,6 +168,18 @@ class RunnerBase:
                     iters_per_epoch = len(self.dataloaders['train'])
                 except (AttributeError, TypeError):
                     iters_per_epoch = 10000
+
+            # warmup_epochs 参数: 基于 epoch 比例控制预热进度
+            # - warmup_epochs=1: 预热一个 epoch
+            # - warmup_epochs=0.5: 预热半个 epoch
+            # - warmup_epochs=5: 预热五个 epoch
+            # 如果未设置 warmup_epochs，则回退到 warmup_steps
+            warmup_epochs = self.config.run_cfg.get("warmup_epochs", None)
+            if warmup_epochs is not None:
+                warmup_steps = int(warmup_epochs * iters_per_epoch)
+                logging.info(f"使用 warmup_epochs={warmup_epochs}, 计算得到 warmup_steps={warmup_steps}")
+            else:
+                warmup_steps = self.config.run_cfg.get("warmup_steps", 0)
 
             self._lr_sched = lr_sched_cls(
                 optimizer=self.optimizer,
@@ -397,8 +419,19 @@ class RunnerBase:
                 #         dataset=self.datasets["train"],
                 #     )
                 train_stats = self.train_epoch(cur_epoch)
-                wandb.log(train_stats)
                 self.log_stats(split_name="train", stats=train_stats)
+            
+            # 计算当前的全局 step（与训练时一致，基于 iteration）
+            # 训练过程中的 step 已经在 base_task.py 中记录（0 到 iters_per_epoch-1）
+            # 这里评估阶段使用该 epoch 结束后的 step，保证单调递增
+            iters_per_epoch = self.lr_scheduler.iters_per_epoch
+            if self.evaluate_only:
+                # 仅评估模式：使用 epoch 作为 step（没有训练的 iteration）
+                global_step = cur_epoch
+            else:
+                # 训练+评估模式：使用该 epoch 的最后一个 step
+                # epoch 0: step 0-99, 评估使用 step 99
+                global_step = cur_epoch * iters_per_epoch + (iters_per_epoch - 1)
 
             # evaluation phase
             if len(self.valid_splits) > 0 and (self.evaluate_only or cur_epoch%self.val_freq == 0):
@@ -409,6 +442,7 @@ class RunnerBase:
                         split_name=split_name, cur_epoch=cur_epoch
                     )
                     print("val_log:",val_log)
+                    wandb.log({"val_log": val_log}, step=global_step)
                     if val_log is not None:
                         if is_main_process():
                             assert (
@@ -416,12 +450,14 @@ class RunnerBase:
                             ), "No agg_metrics found in validation log."
 
                             agg_metrics = val_log["agg_metrics"]
+                            wandb.log({"agg_metrics": agg_metrics}, step=global_step)
                             if agg_metrics > best_agg_metric and split_name == "val":
                                 best_epoch, best_agg_metric = cur_epoch, agg_metrics
                                 if not self.evaluate_only:
                                     self._save_checkpoint(cur_epoch, is_best=True)
 
                             val_log.update({"best_epoch": best_epoch})
+                            wandb.log({"best_epoch": best_epoch}, step=global_step)
                             print("Now the best epoch:", best_epoch)
                             self.log_stats(val_log, split_name)
 
@@ -639,6 +675,27 @@ class RunnerBase:
         Load the best checkpoint for evaluation.
         """
         checkpoint_path = os.path.join(self.output_dir, "checkpoint_best.pth")
+
+        # Fallback: if best checkpoint does not exist, try to load the latest epoch checkpoint
+        if not os.path.exists(checkpoint_path):
+            logging.warning(
+                "Best checkpoint not found at {}. Falling back to latest epoch checkpoint.".format(checkpoint_path)
+            )
+            import re
+            from glob import glob
+
+            pattern = os.path.join(self.output_dir, "checkpoint_*.pth")
+            ckpts = []
+            for p in glob(pattern):
+                m = re.search(r"checkpoint_(\\d+)\\.pth$", os.path.basename(p))
+                if m:
+                    ckpts.append((int(m.group(1)), p))
+            if ckpts:
+                ckpts.sort(key=lambda x: x[0])
+                checkpoint_path = ckpts[-1][1]
+            else:
+                logging.warning("No epoch checkpoints found. Using current in-memory weights for evaluation.")
+                return model
 
         logging.info("Loading checkpoint from {}.".format(checkpoint_path))
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
