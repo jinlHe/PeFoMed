@@ -10,6 +10,7 @@ import os
 import warnings
 import torch
 import torch.distributed as dist
+import wandb
 from pefomed.common.dist_utils import get_rank, get_world_size, is_main_process, is_dist_avail_and_initialized
 from pefomed.common.logger import MetricLogger, SmoothedValue
 from pefomed.common.registry import registry
@@ -184,6 +185,13 @@ class BaseTask:
         """
         warnings.filterwarnings("ignore", message="huggingface/tokenizers: The current process just got forked,")
         use_amp = scaler is not None
+        
+        # 确定 AMP 精度类型并记录
+        if use_amp:
+            amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            logging.info(f"AMP enabled with dtype: {amp_dtype}")
+        else:
+            amp_dtype = None
 
         if not hasattr(data_loader, "__next__"):
             # convert to iterator if not already
@@ -231,33 +239,80 @@ class BaseTask:
 
             lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
 
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            # 使用 bfloat16 autocast（如果 GPU 支持），比 float16 数值更稳定
+            # bfloat16 有更大的数值范围，不容易在 attention 计算中溢出
+            amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+            with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                 loss, loss_dict = self.train_step(model=model, samples=samples)
                 loss /= accum_grad_iters #TODO: not affect loss_dict values for logging
 
             # after_train_step()
+            # 检查 loss 是否为 NaN，跳过该样本避免污染模型
+            if torch.isnan(loss) or torch.isinf(loss):
+                logging.warning(f"Detected NaN/Inf loss at iter {i}, skipping this batch")
+                logging.warning(f"  Current lr: {optimizer.param_groups[0]['lr']:.8f}")
+                logging.warning(f"  Scaler scale: {scaler.get_scale() if use_amp and scaler else 'N/A'}")
+                # 检查模型参数是否有 NaN
+                nan_params = []
+                for name, param in model.named_parameters():
+                    if param.requires_grad and param.grad is not None:
+                        if torch.isnan(param.grad).any():
+                            nan_params.append(name)
+                if nan_params:
+                    logging.warning(f"  NaN gradients found in: {nan_params[:5]}...")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             if use_amp:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # print("##############################################")
-            #
-            # for name, param in model.named_parameters():
-            #     if param.requires_grad and param.grad is None:
-            #         print(f"{name} requires_grad and not used forward pass.")
-            # print("##############################################")
-                    # update gradients every accum_grad_iters iterations
+            # update gradients every accum_grad_iters iterations
             if (i + 1) % accum_grad_iters == 0:
+                if use_amp:
+                    # 在 AMP 模式下，先 unscale 梯度再进行梯度裁剪
+                    scaler.unscale_(optimizer)
+                
+                # 添加梯度裁剪，防止梯度爆炸导致 NaN
+                # max_norm=1.0 是一个常用的保守值
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    max_norm=1.0
+                )
+                
                 if use_amp:
                     scaler.step(optimizer)
                     scaler.update()                     
                 else:    
                     optimizer.step()
-                optimizer.zero_grad()
+                # 使用set_to_none=True可以减少显存占用,因为直接释放梯度张量而不是置零
+                optimizer.zero_grad(set_to_none=True)
 
             metric_logger.update(**loss_dict)
             metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+            
+            # 记录 loss 到 wandb（仅在主进程中记录，按 log_freq 频率记录）
+            if is_main_process() and (i % log_freq == 0 or i == iters_per_epoch - 1):
+                # 计算全局步数
+                global_step = inner_epoch * iters_per_epoch + i
+                
+                # 准备要记录的指标
+                wandb_log_dict = {
+                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                    "train/epoch": inner_epoch,
+                    "train/iter": i,
+                }
+                
+                # 记录所有 loss（使用当前值）
+                for loss_name, loss_value in loss_dict.items():
+                    if isinstance(loss_value, torch.Tensor):
+                        wandb_log_dict[f"train/{loss_name}"] = loss_value.item()
+                    else:
+                        wandb_log_dict[f"train/{loss_name}"] = loss_value
+                
+                # 发送到 wandb
+                wandb.log(wandb_log_dict, step=global_step)
 
         # after train_epoch()
         # gather the stats from all processes
